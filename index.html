@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NIMBY · 财务地图分析台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='9' fill='none' stroke='%233457d5' stroke-width='3'/%3E%3Ccircle cx='12' cy='12' r='3.4' fill='%233457d5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/></svg>
+    <div class="brand-txt">
+      <b>NIMBY · 财务地图分析台</b>
+      <span class="brand-sub" id="brand-sub">线路 · 站点 · 盈亏 · 对比</span>
+    </div>
+  </div>
+  <div id="tb-center">
+    <button id="btn-open-import" class="btn primary">＋ 导入游戏导出数据</button>
+    <span id="import-quick" class="tb-quick hidden">
+      <span class="lbl">当前档案</span>
+      <select id="sel-active-import"></select>
+      <button id="btn-compare" class="btn ghost sm" title="与历史导入做选择性对比">⇄ 对比分析</button>
+    </span>
+  </div>
+  <div class="tb-right">
+    <button id="btn-export-center" class="btn ghost">⤓ 导出中心</button>
+    <button id="btn-help" class="btn ghost icon" title="使用说明">?</button>
+  </div>
+</header>
+
+<div id="layout">
+  <aside id="sidebar">
+    <section class="panel" id="panel-imports">
+      <div class="p-head"><span>导入档案 · 财务快照</span><span id="imp-count" class="count"></span></div>
+      <ul id="import-list" class="import-list"></ul>
+      <div class="empty-hint hidden" id="import-list-empty">尚无档案<br>点击顶部「导入游戏导出数据」</div>
+    </section>
+
+    <section class="panel" id="panel-period">
+      <div class="p-head"><span>分析周期</span></div>
+      <div class="seg" id="seg-granularity" title="账目粒度"></div>
+      <label class="field-label">账期
+        <select id="sel-bucket"></select>
+      </label>
+    </section>
+
+    <section class="panel" id="panel-mapopt">
+      <div class="p-head"><span>地图显示</span><span id="region-count" class="count"></span></div>
+      <div class="chk-row">
+        <label class="chk"><input type="checkbox" id="chk-lines" checked><span>线路</span></label>
+        <label class="chk"><input type="checkbox" id="chk-stations" checked><span>站点热度</span></label>
+        <label class="chk"><input type="checkbox" id="chk-labels" checked><span>站名(放大后)</span></label>
+      </div>
+      <div class="heat-cfg">
+        <label class="field-label">站点热度指标
+          <select id="sel-metric-station"></select>
+        </label>
+        <label class="field-label">线路热度指标
+          <select id="sel-metric-line"></select>
+        </label>
+        <label class="field-label">颜色方案
+          <select id="sel-scheme">
+            <option value="seq">热度渐变 (浅→深)</option>
+            <option value="div">盈亏分色 (红亏绿盈)</option>
+          </select>
+        </label>
+        <label class="field-label">数值标尺
+          <select id="sel-scale"><option value="sqrt">平方根(适合热度)</option><option value="linear">线性</option><option value="log">对数</option></select>
+        </label>
+      </div>
+      <div class="p-sub">区域筛选</div>
+      <div id="region-chips" class="chips"></div>
+      <div class="row2">
+        <button id="btn-region-all" class="btn ghost xs">全部区域</button>
+        <button id="btn-region-fit" class="btn ghost xs">适配当前区域</button>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-legend-panel">
+      <div class="p-head"><span>图例 · 热度</span></div>
+      <div id="legend-heat"></div>
+      <div id="legend-net" class="legend-net"></div>
+    </section>
+  </aside>
+
+  <main id="main">
+    <div id="kpis"></div>
+    <div id="mapwrap">
+      <div id="map"></div>
+      <div id="map-top-left">
+        <button class="maptool" id="btn-fit-world" title="缩放到全部">⛶ 全部</button>
+      </div>
+      <div id="map-coords"></div>
+    </div>
+
+    <div id="tabsbar">
+      <button class="tab active" data-tab="overview">运营总览</button>
+      <button class="tab" data-tab="lines">线路财务</button>
+      <button class="tab" data-tab="stations">站点客流</button>
+      <button class="tab" data-tab="trend">走势趋势</button>
+      <button class="tab" data-tab="compare">⇄ 历史对比</button>
+      <span class="tab-spacer"></span>
+      <span id="view-hint" class="view-hint"></span>
+    </div>
+    <div id="tabview"></div>
+  </main>
+
+  <aside id="rankpanel">
+    <section class="panel" id="panel-company-cards">
+      <div class="p-head"><span>公司财务 · 当前账期</span></div>
+      <div id="metriccards"></div>
+    </section>
+    <section class="panel">
+      <div class="p-head"><span>排行</span></div>
+      <div class="rank-tabs">
+        <button class="rank-tab active" data-rank="worst">最亏损线路</button>
+        <button class="rank-tab" data-rank="best">最盈利线路</button>
+        <button class="rank-tab" data-rank="busy">客流Top站点</button>
+      </div>
+      <div id="ranklist"></div>
+    </section>
+    <section class="panel">
+      <div class="p-head"><span>提示</span></div>
+      <div id="datatips" class="datatips"></div>
+    </section>
+  </aside>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="vendor/echarts/echarts.min.js"></script>
+<script src="src/core.js"></script>
+<script src="src/parser.js"></script>
+<script src="src/engine.js"></script>
+<script src="src/store.js"></script>
+<script src="src/mapview.js"></script>
+<script src="src/charts.js"></script>
+<script src="src/tables.js"></script>
+<script src="src/compare.js"></script>
+<script src="src/exportcenter.js"></script>
+<script src="src/app.js"></script>
+</body>
+</html>
