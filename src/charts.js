@@ -104,6 +104,33 @@ window.NFB = window.NFB || {};
       }],
     });
   };
+  H.radar = function (c, indicators, values, opts) {
+    opts = opts || {};
+    c.setOption({
+      radar: {
+        indicator: indicators,
+        radius: opts.radius || "66%",
+        center: ["50%", "54%"],
+        splitNumber: 4,
+        axisName: { color: INK, fontSize: 11.5, fontFamily: FONT },
+        axisLine: { lineStyle: { color: "#e4e9f2" } },
+        splitLine: { lineStyle: { color: "#e9eef6" } },
+        splitArea: { areaStyle: { color: ["#fbfcfe", "#f5f8fd"] } },
+      },
+      tooltip: { backgroundColor: "rgba(28,35,51,.92)", borderWidth: 0, textStyle: { color: "#fff", fontSize: 11, fontFamily: FONT } },
+      series: [{
+        type: "radar",
+        symbolSize: 5,
+        data: [{
+          value: values,
+          name: opts.name || "综合评分",
+          lineStyle: { color: opts.color || "#3457d5", width: 2.2 },
+          itemStyle: { color: opts.color || "#3457d5" },
+          areaStyle: { color: "rgba(52,87,213,.16)" },
+        }],
+      }],
+    });
+  };
   H.snapshot = function (c) {
     return c.getDataURL({ pixelRatio: 2, backgroundColor: "#fff" });
   };

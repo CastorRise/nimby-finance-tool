@@ -709,8 +709,214 @@ window.NFB = window.NFB || {};
     if (pts.length) NS.mapview.fitRect(L.latLngBounds(pts), 13);
   }
 
+  /* ============ ADVISOR (auto operating analysis) ============ */
+  function scoreCls(v) {
+    if (v == null) return "na";
+    if (v >= 80) return "a";
+    if (v >= 65) return "b";
+    if (v >= 50) return "c";
+    if (v >= 35) return "d";
+    return "e";
+  }
+  function renderAdvisor(view) {
+    view.classList.add("tabpage", "scroll");
+    const ad = NS.advisor;
+    let r;
+    try { r = ad.analyze(imp, st.per, st.ts); }
+    catch (e) { console.error(e); r = { ok: false, reason: "分析失败: " + e.message }; }
+    if (!r.ok) {
+      const c = core.el("div", "panel", "");
+      c.innerHTML = `<div class="p-head"><span>运营诊断</span></div><div class="empty-hint" style="padding:26px">${core.esc(r.reason)}<br>请在左侧选择有账目的周期粒度与账期。</div>`;
+      view.appendChild(c);
+      return;
+    }
+    /* header */
+    const head = core.el("div", "panel adv-head", "");
+    head.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div>
+          <div class="adv-h1">运营诊断 · 自动分析</div>
+          <div class="adv-h2">基于左侧所选账期：<b>${core.esc(r.scopeLabel)}</b>（${core.periodLabel(st.per)}粒度）${r.days ? ` · 站点数据由日账汇总 ${r.days.days} 天` : ""}${r.prevTs ? ` · 环比 ${core.esc(core.fmtBucket(st.per, r.prevTs))}` : ""}</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn sm" id="adv-reload">↻ 重新分析</button>
+          <button class="btn sm primary" id="adv-view">👁 查看完整报告</button>
+          <button class="btn sm" id="adv-copy">⧉ 复制 Markdown</button>
+          <button class="btn sm" id="adv-export">⤓ 下载 .md</button>
+        </div>
+      </div>`;
+    view.appendChild(head);
+
+    /* score + radar */
+    const row = core.el("div", "charts-row");
+    const scoreCard = core.el("div", "chart-card", "");
+    const total = r.scores.total;
+    scoreCard.innerHTML = `
+      <div class="cc-head">综合运营评分<span class="sub">0-100 · 越高越健康</span></div>
+      <div class="adv-score">
+        <div class="adv-score-num ${scoreCls(total)}">${total == null ? "—" : total.toFixed(0)}</div>
+        <div class="adv-score-side">
+          <span class="adv-grade ${r.grade.cls}">${core.esc(r.grade.label)}</span>
+          <div class="adv-score-note">${r.lineStats.losing} / ${r.lineStats.total} 条线路运营亏损</div>
+        </div>
+      </div>
+      <div class="adv-bars">
+        ${ad.DIMS.map((d) => {
+          const v = r.scores.parts[d.id];
+          return `<div class="adv-bar-row">
+            <span class="adv-bar-l">${d.label}</span>
+            <span class="adv-bar-track"><i class="${scoreCls(v)}" style="width:${v == null ? 0 : Math.max(3, v)}%"></i></span>
+            <span class="adv-bar-v">${v == null ? "—" : v.toFixed(0)}</span>
+          </div>`;
+        }).join("")}
+      </div>`;
+    row.appendChild(scoreCard);
+    const radarCard = core.el("div", "chart-card", "");
+    radarCard.innerHTML = `<div class="cc-head">能力雷达<span class="sub">无上期数据时“需求增长”计 0 且不参与总分</span></div><div id="adv-radar" class="chart sm"></div>`;
+    row.appendChild(radarCard);
+    view.appendChild(row);
+
+    /* summary */
+    const sum = core.el("div", "panel", "");
+    sum.innerHTML = `<div class="p-head"><span>核心结论</span></div><ul class="adv-summary">${r.summary.map((x) => `<li>${x}</li>`).join("")}</ul>`;
+    view.appendChild(sum);
+
+    /* insight groups */
+    const LV = { danger: ["需要重点关注", "danger"], warn: ["建议关注 / 可优化", "warn"], good: ["表现良好", "good"], info: ["提示与机会", "info"] };
+    ["danger", "warn", "good", "info"].forEach((lv) => {
+      const arr = r.insights.filter((x) => x.level === lv);
+      if (!arr.length) return;
+      const sec = core.el("div", "panel adv-sec", "");
+      sec.innerHTML = `<div class="p-head"><span>${LV[lv][0]}</span><span class="count">${arr.length} 条</span></div>`;
+      const grid = core.el("div", "adv-grid", "");
+      arr.forEach((x) => {
+        const card = core.el("div", "adv-card lv-" + lv, "");
+        const pills = (x.evidence || []).slice(0, 5).map((e) => `<span class="adv-pill"><b>${core.esc(e.label)}</b> ${core.esc(String(e.value))}</span>`).join("");
+        let actions = "";
+        if (x.link && x.link.type === "line") {
+          actions = `<button class="btn xs" data-act="map-line" data-name="${core.esc(x.link.name)}">地图定位</button>
+                     <button class="btn xs" data-act="tbl-line" data-name="${core.esc(x.link.name)}">线路表</button>`;
+        } else if (x.link && x.link.type === "station") {
+          actions = `<button class="btn xs" data-act="map-station" data-id="${x.link.id}">地图定位</button>`;
+        }
+        card.innerHTML = `
+          <div class="adv-top">
+            <span class="adv-dot"></span>
+            <span class="adv-title">${core.esc(x.title)}</span>
+            <span class="adv-cat">${core.esc(x.category)}</span>
+          </div>
+          <div class="adv-sum">${x.summary}</div>
+          ${pills ? `<div class="adv-pills">${pills}</div>` : ""}
+          <div class="adv-sug">${core.esc(x.suggestion)}</div>
+          ${actions ? `<div class="adv-actions">${actions}</div>` : ""}`;
+        card.querySelectorAll("[data-act]").forEach((b) => {
+          b.onclick = () => {
+            const act = b.dataset.act;
+            if (act === "map-line") locateLine(b.dataset.name);
+            else if (act === "tbl-line") focusLine(b.dataset.name);
+            else if (act === "map-station") focusStation(Number(b.dataset.id));
+          };
+        });
+        grid.appendChild(card);
+      });
+      sec.appendChild(grid);
+      view.appendChild(sec);
+    });
+
+    /* methods footnote */
+    const foot = core.el("div", "panel", "");
+    foot.innerHTML = `
+      <details class="adv-details">
+        <summary>评分口径与数据说明</summary>
+        <div class="adv-method">
+          ${ad.DIMS.map((d) => `<div><b>${d.label}</b>（权重 ${Math.round(d.weight * 100)}%）：${d.desc}</div>`).join("")}
+          <div>总分 = 各维度按权重加权平均；“需求增长”无上一账期时不参与计分并重新分配权重。</div>
+          <div>分析范围：当前档案所选账期内的<b>全部线路与站点</b>（不受地图区域筛选影响）。</div>
+          <div>数据口径：票款净额 = 票款 + 退票 + 补偿；运营成本 = 运行 + 维护 + 干预；运营利润 = 票款净额 − 运营成本；公司现金流含建设与购车等资本支出。</div>
+          ${r.days ? `<div>站点账目在“${core.periodLabel(st.per)}”粒度下由日账自动汇总，覆盖 ${r.days.days} 天（${r.days.from} ~ ${r.days.to}）。</div>` : ""}
+          <div>结论为规则化自动生成，用于快速定位问题，具体决策请结合游戏内实际运营情况。</div>
+        </div>
+      </details>`;
+    view.appendChild(foot);
+
+    /* charts & buttons */
+    charts.radar(mkChart("adv-radar"),
+      ad.DIMS.map((d) => ({ name: d.label, max: 100 })),
+      ad.DIMS.map((d) => { const v = r.scores.parts[d.id]; return v == null ? 0 : Math.round(v); }),
+      { name: "运营评分" });
+    document.getElementById("adv-reload").onclick = () => renderActiveTab();
+    document.getElementById("adv-export").onclick = () => {
+      const label = core.fmtBucket(st.per, st.ts).replace(/[\/:*?"<>|\s]+/g, "_");
+      core.download(`运营分析报告_${label}.md`, ad.toMarkdown(imp, r), "text/markdown;charset=utf-8");
+      toast("已下载 Markdown 报告文件", "ok");
+    };
+    document.getElementById("adv-copy").onclick = async () => {
+      const ok = await copyText(ad.toMarkdown(imp, r));
+      toast(ok ? "报告 Markdown 已复制到剪贴板" : "复制失败，请改用下载 .md", ok ? "ok" : "err");
+    };
+    document.getElementById("adv-view").onclick = () => openReportModal(imp, r);
+  }
+
+  /* copy text with clipboard API + textarea fallback */
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+    } catch (e) {}
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px;top:0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  }
+
+  /* in-page report viewer (document style, printable) */
+  function openReportModal(theImp, r) {
+    const body = core.el("div", "rpt-wrap", "");
+    body.innerHTML = NS.advisor.reportHTML(theImp, r);
+    const btnCopy = core.el("button", "btn sm", "⧉ 复制 Markdown");
+    const btnPrint = core.el("button", "btn sm", "🖨 打印 / 存 PDF");
+    const btnDl = core.el("button", "btn sm primary", "⤓ 下载 .md");
+    const btnClose = core.el("button", "btn sm", "关闭");
+    const m = NS.exportcenter.showModal({
+      title: "运营分析报告",
+      body, wide: true,
+      footer: [btnClose, btnPrint, btnCopy, btnDl],
+    });
+    if (m.modal) m.modal.classList.add("report-modal");
+    btnClose.onclick = m.close;
+    btnDl.onclick = () => {
+      const label = core.fmtBucket(st.per, st.ts).replace(/[\/:*?"<>|\s]+/g, "_");
+      core.download(`运营分析报告_${label}.md`, NS.advisor.toMarkdown(theImp, r), "text/markdown;charset=utf-8");
+      toast("已下载 Markdown 报告文件", "ok");
+    };
+    btnCopy.onclick = async () => {
+      const ok = await copyText(NS.advisor.toMarkdown(theImp, r));
+      toast(ok ? "报告 Markdown 已复制到剪贴板" : "复制失败", ok ? "ok" : "err");
+    };
+    btnPrint.onclick = () => {
+      document.body.classList.add("printing-report");
+      setTimeout(() => {
+        try { window.print(); } catch (e) {}
+        setTimeout(() => document.body.classList.remove("printing-report"), 1000);
+      }, 60);
+    };
+  }
+  A.locateLine = function (name) {
+    if (!imp) return;
+    const ln = imp.lines.find((x) => x.name === name);
+    if (!ln) return;
+    const pts = [];
+    for (const sid of ln.staIds) { const s = imp.stById.get(sid); if (s && s.lon != null) pts.push([s.lat, s.lon]); }
+    if (pts.length) NS.mapview.fitRect(L.latLngBounds(pts), 13);
+  };
+
   /* ---------------- tabs ---------------- */
-  const tabs = ["overview", "lines", "stations", "trend", "compare"];
+  const tabs = ["overview", "advisor", "lines", "stations", "trend", "compare"];
   function switchTab(tab) {
     if (!tabs.includes(tab)) tab = "overview";
     st.tab = tab;
@@ -726,6 +932,7 @@ window.NFB = window.NFB || {};
     renderActiveTab();
   }
   function renderActiveTab() {
+    killCharts();
     const view = document.getElementById("tabview");
     view.innerHTML = "";
     currentCSV = null;
@@ -740,6 +947,7 @@ window.NFB = window.NFB || {};
     }
     hint.textContent = "";
     if (t === "overview") renderOverview(view);
+    else if (t === "advisor") renderAdvisor(view);
     else if (t === "lines") renderLines(view);
     else if (t === "stations") renderStations(view);
     else if (t === "trend") renderTrend(view);
