@@ -6,12 +6,20 @@ window.NFB = window.NFB || {};
   const core = NS.core, store = NS.store, engine = NS.engine;
 
   /* ---------- generic modal ---------- */
-  X.showModal = function ({ title, body, footer, wide, narrow }) {
+  X.showModal = function ({ title, body, footer, wide, narrow, onClose }) {
     const root = document.getElementById("modal-root");
+    const previousFocus = document.activeElement;
+    const lowerOverlay = root.lastElementChild;
+    if (lowerOverlay) lowerOverlay.inert = true;
     const overlay = core.el("div", "overlay");
     const modal = core.el("div", "modal" + (wide ? " wide" : narrow ? " narrow" : ""));
+    const titleId = core.uid("modal-title");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-labelledby", titleId);
+    modal.tabIndex = -1;
     const head = core.el("div", "m-head");
-    head.innerHTML = `<span>${core.esc(title)}</span><button class="x" aria-label="关闭">✕</button>`;
+    head.innerHTML = `<span id="${titleId}">${core.esc(title)}</span><button class="x" aria-label="关闭">✕</button>`;
     const bodyEl = core.el("div", "m-body");
     bodyEl.append(body);
     modal.appendChild(head);
@@ -23,11 +31,37 @@ window.NFB = window.NFB || {};
     }
     overlay.appendChild(modal);
     root.appendChild(overlay);
-    const close = () => { overlay.remove(); document.removeEventListener("keydown", esc); };
-    const esc = (e) => { if (e.key === "Escape") close(); };
-    document.addEventListener("keydown", esc);
+    document.body.classList.add("modal-open");
+    let closed = false;
+    const close = (reason) => {
+      if (closed) return;
+      closed = true;
+      overlay.remove();
+      document.removeEventListener("keydown", onKeyDown);
+      if (lowerOverlay?.isConnected) lowerOverlay.inert = false;
+      if (!root.childElementCount) document.body.classList.remove("modal-open");
+      onClose?.(reason);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+    const onKeyDown = (e) => {
+      if (root.lastElementChild !== overlay) return;
+      if (e.key === "Escape") { e.preventDefault(); close("dismiss"); return; }
+      if (e.key !== "Tab") return;
+      const focusable = Array.from(modal.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex="-1"])'))
+        .filter((el) => el.getClientRects().length);
+      if (!focusable.length) { e.preventDefault(); modal.focus(); return; }
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
     head.querySelector(".x").onclick = close;
+    requestAnimationFrame(() => {
+      if (closed) return;
+      const target = modal.querySelector("[autofocus],.dropzone,.m-foot .btn.primary,.m-head .x");
+      (target || modal).focus();
+    });
     return { close, modal, bodyEl };
   };
   X.confirm = function (msg, okText) {
@@ -36,10 +70,10 @@ window.NFB = window.NFB || {};
       const btnNo = core.el("button", "btn", "取消");
       const m = X.showModal({
         title: "请确认", body: core.el("div", "step-hint", msg),
-        footer: [btnNo, btnOk],
+        footer: [btnNo, btnOk], onClose: () => res(false),
       });
-      btnNo.onclick = () => { m.close(); res(false); };
-      btnOk.onclick = () => { m.close(); res(true); };
+      btnNo.onclick = () => m.close();
+      btnOk.onclick = () => { res(true); m.close("confirm"); };
     });
   };
 
@@ -217,8 +251,12 @@ window.NFB = window.NFB || {};
       `从 <b>NIMBY Rails</b> 游戏导出：可同时放入 <b>会计账目(*.tsv)</b> 与 <b>时刻表(*.json)</b>（也可只放一种）。
       <br>也可以选择本工具导出的 <b>.nb.json 数据包</b>，会直接并入工作区（跨设备同步用）。`);
     const dz = core.el("div", "dropzone");
-    dz.innerHTML = `<div class="dz-t">点击选择 或 拖放文件到这里</div>
-      <div style="font-size:11.6px">支持多选: Accounting *.tsv + Timetable *.json + *.nb.json</div>`;
+    dz.setAttribute("role", "button");
+    dz.setAttribute("tabindex", "0");
+    dz.setAttribute("aria-label", "选择或拖入会计账目、时刻表或数据包文件");
+    dz.innerHTML = `<svg class="dz-icon" viewBox="0 0 40 40" fill="none" aria-hidden="true"><rect x="5" y="8" width="30" height="26" rx="5" stroke="currentColor" stroke-width="1.8"/><path d="M20 26V14m0 0-4 4m4-4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="dz-t">选择文件，或拖放到这里</div>
+      <div class="dz-sub">支持多选 · Accounting .tsv、Timetable .json、数据包 .nb.json</div>`;
     const fileList = core.el("div", "file-list");
     const progWrap = core.el("div", "", "");
     body.append(hint, dz, fileList, progWrap);
@@ -234,7 +272,10 @@ window.NFB = window.NFB || {};
     input.style.display = "none";
     dz.appendChild(input);
     input.onchange = () => { accept(input.files); input.value = ""; };
-    dz.onclick = () => input.click();
+    dz.onclick = (e) => { if (e.target !== input) input.click(); };
+    dz.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+    };
     dz.ondragover = (e) => { e.preventDefault(); dz.classList.add("over"); };
     dz.ondragleave = () => dz.classList.remove("over");
     dz.ondrop = (e) => {
@@ -252,9 +293,10 @@ window.NFB = window.NFB || {};
     btnImport.onclick = async () => {
       if (!selected.length) return;
       btnImport.disabled = true;
+      btnImport.setAttribute("aria-busy", "true");
       const prog = core.el("div", "", "");
       progWrap.innerHTML = ""; progWrap.appendChild(prog);
-      const setProg = (p, txt) => { prog.innerHTML = `<div class="progress"><i style="width:${p}%"></i></div><div class="progress-txt">${core.esc(txt)}</div>`; };
+      const setProg = (p, txt) => { prog.innerHTML = `<div class="progress" role="progressbar" aria-label="导入进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p}"><i style="width:${p}%"></i></div><div class="progress-txt" role="status">${core.esc(txt)}</div>`; };
       try {
         setProg(3, "读取文件…");
         const contents = await Promise.all(selected.map((f) => new Promise((res, rej) => {
@@ -275,6 +317,7 @@ window.NFB = window.NFB || {};
         if (!json && !tsv && !bundles.length) {
           NS.app.toast("没有可导入的文件内容", "err");
           btnImport.disabled = false;
+          btnImport.removeAttribute("aria-busy");
           return;
         }
         if (bundles.length) {
@@ -318,7 +361,7 @@ window.NFB = window.NFB || {};
               <span class="k">站点账行</span><span class="v">${s.accStationRows}</span>
               <span class="k">账期粒度</span><span class="v">${Object.keys(s.buckets).map((p) => `${core.periodLabel(p)}×${s.buckets[p]}`).join(" · ") || "—"}</span>
             </div>
-            <div class="note-box" style="margin-top:10px">${!s.geoOk ? "⚠ 未识别到线路几何(JSON)，地图将按账目坐标示意。" : ""}${!s.finOk ? "⚠ 未识别到会计账目(TSV)。" : ""}</div>`;
+            ${!s.geoOk || !s.finOk ? `<div class="note-box" style="margin-top:10px">${!s.geoOk ? "⚠ 未识别到线路几何(JSON)，地图将按账目坐标示意。" : ""}${!s.finOk ? "⚠ 未识别到会计账目(TSV)。" : ""}</div>` : ""}`;
           const auto = (store.ws().settings || {}).autoBackup !== false;
           const abBox = core.el("div", "chk-row", "");
           abBox.style.margin = "10px 0 2px";
@@ -327,23 +370,24 @@ window.NFB = window.NFB || {};
           const lblInp = core.el("div", "field-label", "档案名称(可修改)");
           const nameInp = document.createElement("input");
           nameInp.type = "text";
-          nameInp.style.cssText = "border:1px solid #d4dbe7;border-radius:8px;padding:6px 8px";
           nameInp.value = imp.label;
           lblInp.appendChild(nameInp);
           p2.appendChild(lblInp);
           const m2 = X.showModal({
             title: "确认导入", body: p2,
+            onClose: () => { btnImport.disabled = false; btnImport.removeAttribute("aria-busy"); },
             footer: [
               core.el("button", "btn", "取消"),
               (() => { const b = core.el("button", "btn primary", "导入到工作区"); return b; })(),
             ],
           });
+          m2.modal.querySelector(".m-foot .btn:first-child").onclick = () => m2.close();
           m2.modal.querySelector(".m-foot .btn.primary").onclick = async () => {
             imp.label = nameInp.value.trim() || imp.label;
             const ab = p2.querySelector("#imp-auto-bk");
             await store.setSettings({ autoBackup: ab ? ab.checked : true });
             const id = await store.addImport(imp);
-            m.close(); m2.close();
+            m2.close(); m.close();
             NS.app.reloadAll && NS.app.reloadAll(id);
             if (ab && ab.checked) NS.app.autoBackup(imp);
             NS.app.toast(`已导入「${imp.label}」`, "ok");
@@ -356,6 +400,7 @@ window.NFB = window.NFB || {};
         console.error(e);
         NS.app.toast("导入失败: " + e.message, "err");
         btnImport.disabled = false;
+        btnImport.removeAttribute("aria-busy");
       }
     };
     btnCancel.onclick = m.close;

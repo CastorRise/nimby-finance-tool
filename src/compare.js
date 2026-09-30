@@ -12,6 +12,10 @@ window.NFB = window.NFB || {};
     baseImp: null, targetImp: null,
   };
   const cache = new Map();
+  const chartInstances = [];
+  Cmp.dispose = function () {
+    chartInstances.splice(0).forEach((chart) => charts.dispose(chart));
+  };
 
   async function getImp(id) {
     if (cache.has(id)) return cache.get(id);
@@ -45,6 +49,7 @@ window.NFB = window.NFB || {};
 
   Cmp.open = async function (rootEl, opts) {
     opts = opts || {};
+    Cmp.dispose();
     state.rootEl = rootEl;
     const metas = store.ws().imports;
     if (opts.auto) {
@@ -91,12 +96,15 @@ window.NFB = window.NFB || {};
     mBox.innerHTML = "";
     cmpMetrics.forEach((id) => {
       const def = engine.METRIC_BY_ID[id];
-      const chip = core.el("span", "chip" + (id === state.main ? " on" : ""));
+      const chip = core.el("button", "chip" + (id === state.main ? " on" : ""));
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(id === state.main));
       chip.textContent = def.label;
       chip.onclick = () => {
         state.main = id;
-        mBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("on"));
+        mBox.querySelectorAll(".chip").forEach((c) => { c.classList.remove("on"); c.setAttribute("aria-pressed", "false"); });
         chip.classList.add("on");
+        chip.setAttribute("aria-pressed", "true");
         render();
       };
       mBox.appendChild(chip);
@@ -118,9 +126,10 @@ window.NFB = window.NFB || {};
     const box = document.getElementById("cmp-saved");
     if (!box) return;
     const saved = store.ws().comparisons;
-    box.innerHTML = saved.length ? '<span style="font-size:11px;color:#93a0b4;margin-right:6px">已保存:</span>' : "";
+    box.innerHTML = saved.length ? '<span class="count" style="margin-right:6px">已保存:</span>' : "";
     saved.forEach((c) => {
-      const span = core.el("span", "chip on", core.esc(c.name));
+      const span = core.el("button", "chip", core.esc(c.name));
+      span.type = "button";
       span.onclick = async () => {
         state.baseId = c.baseId; state.targetId = c.targetId;
         state.per = c.per || "daily"; state.main = c.main || "opProfit";
@@ -131,6 +140,7 @@ window.NFB = window.NFB || {};
         document.getElementById("cmp-metrics").querySelectorAll(".chip").forEach((x) => {
           const def = engine.METRIC_BY_ID[state.main];
           x.classList.toggle("on", x.textContent === (def || {}).label);
+          x.setAttribute("aria-pressed", String(x.textContent === (def || {}).label));
         });
         await loadImports(); render();
       };
@@ -146,6 +156,7 @@ window.NFB = window.NFB || {};
   }
 
   function render() {
+    Cmp.dispose();
     const body = document.getElementById("cmp-body");
     if (!body) return;
     body.innerHTML = "";
@@ -219,7 +230,7 @@ window.NFB = window.NFB || {};
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:4px 18px">
           ${bothSide.map(({ k, av, bv, unit: u }) => `
             <div class="vs-row"><span class="k">${k}</span><span class="d">
-              <span style="color:#7a8699">${fmtAny(av, u)}</span> →
+              <span style="color:var(--muted)">${fmtAny(av, u)}</span> →
               <b class="${(bv ?? 0) >= (av ?? 0) ? "pos" : "neg"}">${fmtAny(bv, u)}</b>
               <span class="rt">${fmtDeltaHtml(av, bv, u)}</span></span></div>`).join("")}
           <div class="vs-row"><span class="k">网络变化</span><span class="d">
@@ -228,7 +239,7 @@ window.NFB = window.NFB || {};
         </div>
       </div>
       <div class="charts-row">
-        <div class="chart-card"><div class="cc-head">线路「${mDef.label}」差额 Top 12<span class="sub">蓝=增 红=减(按线路颜色)</span></div><div id="cmp-bar" class="chart sm"></div></div>
+        <div class="chart-card"><div class="cc-head">线路「${mDef.label}」差额 Top 12<span class="sub">条形颜色=线路颜色</span></div><div id="cmp-bar" class="chart sm"></div></div>
         <div class="chart-card"><div class="cc-head">公司「${mDef.label}」两档案走势<span class="sub">时间轴=两档案账期并集</span></div><div id="cmp-trend" class="chart sm"></div></div>
       </div>
       <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:280px">
@@ -244,6 +255,7 @@ window.NFB = window.NFB || {};
     const barItems = lrows.slice().sort((x, y) => Math.abs(y._d) - Math.abs(x._d)).slice(0, 12)
       .map((r) => ({ name: r.name, value: r._d, color: r.color }));
     const c1 = charts.mk(document.getElementById("cmp-bar"));
+    chartInstances.push(c1);
     charts.barH(c1, barItems.map(({ name, value }) => ({ name, value })), { colorBy: (n) => (barItems.find((x) => x.name === n) || {}).color || [120, 130, 150], unit });
     /* trend over union of daily/company or li buckets */
     const buck = (imp, kind) => engine.buckets(imp, per, kind);
@@ -259,9 +271,10 @@ window.NFB = window.NFB || {};
       return valOn(agg, main);
     });
     const c2 = charts.mk(document.getElementById("cmp-trend"));
+    chartInstances.push(c2);
     charts.lineTrend(c2, xs.map((x) => core.fmtBucket(per, x)), [
-      { name: metaA ? metaA.label : "基准", data: ser(base, bA), color: "#9aa6b8" },
-      { name: metaB ? metaB.label : "对比", data: ser(target, bB), color: "#3457d5" },
+      { name: metaA ? metaA.label : "基准", data: ser(base, bA), color: charts.color("--muted") },
+      { name: metaB ? metaB.label : "对比", data: ser(target, bB), color: charts.color("--accent") },
     ], { unit, legend: true });
     /* table */
     let tbl = null;

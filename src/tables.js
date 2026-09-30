@@ -35,10 +35,15 @@ window.NFB = window.NFB || {};
         th.className = col.num ? "num" : "";
         th.innerHTML = col.label + (sortBy === col.k ? (sortDesc ? " ▼" : " ▲") : "");
         th.style.cursor = "pointer";
+        th.tabIndex = 0;
+        th.setAttribute("aria-sort", sortBy === col.k ? (sortDesc ? "descending" : "ascending") : "none");
         th.onclick = () => {
           if (sortBy === col.k) sortDesc = !sortDesc;
           else { sortBy = col.k; sortDesc = !!col.num; }
           draw();
+        };
+        th.onkeydown = (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); th.click(); }
         };
         trh.appendChild(th);
       });
@@ -67,6 +72,10 @@ window.NFB = window.NFB || {};
         if (cfg.onSelect) {
           tr.style.cursor = "pointer";
           tr.onclick = () => cfg.onSelect(row);
+          tr.tabIndex = 0;
+          tr.onkeydown = (e) => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cfg.onSelect(row); }
+          };
         }
         tbody.appendChild(tr);
       });
@@ -74,7 +83,7 @@ window.NFB = window.NFB || {};
         const tr = document.createElement("tr");
         const td = document.createElement("td");
         td.colSpan = cfg.cols.length;
-        td.style.cssText = "text-align:center;color:#93a0b4;padding:22px;";
+        td.className = "grid-empty";
         td.textContent = cfg.emptyText || "无数据";
         tr.appendChild(td);
         tbody.appendChild(tr);

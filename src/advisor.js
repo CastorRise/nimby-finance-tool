@@ -27,11 +27,10 @@ window.NFB = window.NFB || {};
 
   /* ---------- scoring ---------- */
   const DIMS = [
-    { id: "profit", label: "盈利能力", weight: 0.4, desc: "运营利润率：(票款净额 − 运营成本) ÷ 票款净额，−25%~+25% 映射为 0~100 分" },
-    { id: "cost", label: "成本效率", weight: 0.2, desc: "收入成本比：票款净额 ÷ 运营成本，0.7~1.8 映射为 0~100 分" },
-    { id: "reliability", label: "服务可靠", weight: 0.2, desc: "以等待超时、流失、退票、晚点、拒付等占比扣分（占比越高扣得越多）" },
-    { id: "growth", label: "需求增长", weight: 0.1, desc: "客流量相对上一账期的变化率，−15%~+15% 映射为 0~100 分（无上期则不参与计分）" },
-    { id: "structure", label: "成本结构", weight: 0.1, desc: "(维护+干预) ÷ 票款净额，占比 10%~60% 反向映射为 100~0 分" },
+    { id: "profit", label: "盈利能力", weight: 0.45, desc: "运营利润率 = 运营利润 ÷ 净票款，−25%→0 分、盈亏平衡→50 分、+25%→100 分" },
+    { id: "retention", label: "票款留存", weight: 0.2, desc: "退票与补偿金额 ÷ 原票款收入，损失 0%→100 分、20%→0 分" },
+    { id: "coverage", label: "服务保障", weight: 0.2, desc: "获赔乘客 ÷ 已开始行程乘客，获赔 0%→100 分、10%→0 分" },
+    { id: "punctuality", label: "准点表现", weight: 0.15, desc: "累计晚点时长 ÷ 发车次数，分摊晚点 0 分钟→100 分、10 分钟→0 分" },
   ];
   function grade(total) {
     if (total == null) return { label: "数据不足", cls: "na" };
@@ -42,35 +41,28 @@ window.NFB = window.NFB || {};
     return { label: "困难", cls: "e" };
   }
 
-  function computeScores(net, co, prevBoard) {
+  function computeScores(net) {
     const s = {};
-    const margin = net.revenue ? net.opProfit / net.revenue : null;
-    s.profit = margin == null ? null : norm(margin, -0.3, 0.35);
-    const ratio = net.opex ? net.revenue / net.opex : null;
-    s.cost = ratio == null ? null : norm(ratio, 0.7, 1.8);
-    // reliability: penalties
-    let rel = 100, relAny = false;
-    const pen = (v, max, k) => { if (v == null) return; relAny = true; rel -= Math.min(max, v * k); };
-    if (net.paxSpawn) {
-      pen(net.wait / net.paxSpawn, 30, 600);
-      pen(net.lost / net.paxSpawn, 20, 2500);
-    }
-    if (net.paxBoard) {
-      pen(net.refunded / net.paxBoard, 10, 500);
-      pen(net.refuse / net.paxBoard, 15, 1200);
-    }
-    if (net.late != null && net.departures) pen((net.late / net.departures) / 60, 25, 1.5); // 平均每趟晚点分钟数
-    if (net.departures && net.collisions) pen(net.collisions / net.departures, 15, 20000);
-    s.reliability = relAny ? cl(rel, 0, 100) : null;
-    const growth = prevBoard && prevBoard > 0 && net.paxBoard != null ? (net.paxBoard - prevBoard) / prevBoard : null;
-    s.growthRate = growth;
-    s.growth = growth == null ? null : norm(growth, -0.15, 0.15);
-    const struct = net.revenue ? ((net.maintenance || 0) + (net.intervention || 0)) / net.revenue : null;
-    s.structure = struct == null ? null : norm(struct, 0.6, 0.1);
-    let wsum = 0, acc = 0;
-    DIMS.forEach((d) => { const v = s[d.id]; if (v != null) { acc += v * d.weight; wsum += d.weight; } });
-    const total = wsum ? acc / wsum : null;
-    return { parts: s, total, margin, ratio, struct, growth, growthRate: s.growthRate };
+    // A missing export field is unknown, never a healthy zero; partial data
+    // cannot produce a composite score.
+    const margin = net.revenue > 0 && net.opex != null && net.opProfit != null ? net.opProfit / net.revenue : null;
+    s.profit = margin == null ? null : norm(margin, -0.25, 0.25);
+    const fareLossRate = net.fares > 0 && net.refunds != null && net.compensations != null
+      ? (Math.max(0, -net.refunds) + Math.max(0, -net.compensations)) / net.fares : null;
+    s.retention = fareLossRate == null ? null : norm(fareLossRate, 0.2, 0);
+    const compensatedRate = net.paxSpawn > 0 && net.compPax != null ? Math.max(0, net.compPax) / net.paxSpawn : null;
+    s.coverage = compensatedRate == null ? null : norm(compensatedRate, 0.1, 0);
+    const lateMinutes = net.departures > 0 && net.late != null ? Math.max(0, net.late) / net.departures / 60 : null;
+    s.punctuality = lateMinutes == null ? null : norm(lateMinutes, 10, 0);
+    const covered = DIMS.filter((d) => s[d.id] != null).length;
+    const total = covered === DIMS.length ? DIMS.reduce((acc, d) => acc + s[d.id] * d.weight, 0) : null;
+    const observed = {
+      profit: margin == null ? "数据不足" : `运营利润率 ${fmtPct1(margin)}`,
+      retention: fareLossRate == null ? "数据不足" : `退票与补偿占原票款 ${fmtPct1(fareLossRate)}`,
+      coverage: compensatedRate == null ? "数据不足" : `获赔占开始行程 ${fmtPct1(compensatedRate)}`,
+      punctuality: lateMinutes == null ? "数据不足" : `每次发车分摊晚点 ${lateMinutes.toFixed(1)} 分钟`,
+    };
+    return { parts: s, total, covered, observed, margin, fareLossRate, compensatedRate, lateMinutes };
   }
 
   /* ---------- main analysis ---------- */
@@ -124,6 +116,7 @@ window.NFB = window.NFB || {};
       tooFull: co ? M(co, "tooFull") : null,
       refuse: co ? M(co, "refuse") : null,
       refunded: co ? M(co, "refunded") : null,
+      compPax: co ? M(co, "paxCompensated") : null,
       collisions: co ? M(co, "collisions") : null,
       cash: co ? M(co, "cash") : null,
       cTotal: co ? M(co, "cTotal") : null,
@@ -138,7 +131,8 @@ window.NFB = window.NFB || {};
     const prevBoard = coPrev ? M(coPrev, "paxBoard") : null;
     const prevProfit = coPrev ? M(coPrev, "opProfit") : null;
 
-    const scores = computeScores(net, co, prevBoard);
+    const scores = computeScores(net);
+    const growthRate = prevBoard > 0 && net.paxBoard != null ? (net.paxBoard - prevBoard) / prevBoard : null;
 
     /* ---------- line-level benchmark ---------- */
     const boards = lines.map((l) => l.board).filter((v) => v != null);
@@ -174,8 +168,8 @@ window.NFB = window.NFB || {};
     } else if (winning.length || losing.length) {
       summary.push(`线路层面：盈利 ${winning.length} 条、亏损 ${losing.length} 条。`);
     }
-    if (scores.growth != null) {
-      const g = scores.growthRate;
+    if (growthRate != null) {
+      const g = growthRate;
       summary.push(`环比上一账期（${core.fmtBucket(per, prevTs)}）：客流 ${g >= 0 ? "增长" : "下降"} <b class="${g >= 0 ? "pos" : "neg"}">${fmtPct1(Math.abs(g))}</b>${prevProfit != null && net.opProfit != null ? `，利润由 ${fmtMoney(prevProfit)} 变为 <b class="${core.moneyClass(net.opProfit)}">${fmtMoney(net.opProfit)}</b>` : ""}。`);
     }
     if (stMap.size) {
@@ -458,11 +452,12 @@ window.NFB = window.NFB || {};
     lines.push(`- 公司：${imp.companyName || "—"}`);
     lines.push(`- 分析账期：${r.scopeLabel}（${core.periodLabel(r.per)}粒度）`);
     lines.push(`- 生成时间：${r.generatedAt.toLocaleString("zh-CN")}`);
-    lines.push(`- 综合评分：**${r.scores.total == null ? "—" : r.scores.total.toFixed(0)} / 100（${r.grade.label}）**`);
+    lines.push(`- 运营参考评分（工具自定，非游戏官方）：**${r.scores.total == null ? "—" : r.scores.total.toFixed(0) + " / 100"}（${r.grade.label}）**`);
+    lines.push(`- 可用评分项：${r.scores.covered} / ${DIMS.length}；四项齐全才计算总分`);
     lines.push("");
-    lines.push(`| 维度 | 得分 | 说明 |`);
-    lines.push(`| --- | --- | --- |`);
-    DIMS.forEach((d) => { const v = r.scores.parts[d.id]; lines.push(`| ${d.label} | ${v == null ? "—" : v.toFixed(0)} | ${d.desc} |`); });
+    lines.push(`| 维度 | 得分 | 本期观测 | 说明 |`);
+    lines.push(`| --- | --- | --- | --- |`);
+    DIMS.forEach((d) => { const v = r.scores.parts[d.id]; lines.push(`| ${d.label} | ${v == null ? "—" : v.toFixed(0)} | ${r.scores.observed[d.id]} | ${d.desc} |`); });
     lines.push("");
     lines.push(`## 核心结论`);
     r.summary.forEach((s) => lines.push(`- ${s.replace(/<[^>]+>/g, "")}`));
@@ -484,6 +479,8 @@ window.NFB = window.NFB || {};
     });
     lines.push("");
     lines.push(`---`);
+    lines.push(`> 参考分为工具自定，四项账目数据齐全时按固定权重加权；阈值仅用于诊断，不代表游戏官方规则。`);
+    lines.push(`> 乘客可能跨账期完成行程或获得赔付；日账获赔比例仅作提示，不同需求设置下的分数不宜直接比较。`);
     lines.push(`> 数据口径：票款净额=票款+退票+补偿；运营成本=运行+维护+干预；运营利润=票款净额−运营成本。`);
     if (r.days) lines.push(`> 站点数据在「${core.periodLabel(r.per)}」粒度下由日账汇总，覆盖 ${r.days.days} 天（${r.days.from} ~ ${r.days.to}）。`);
     return lines.join("\n");
@@ -499,7 +496,7 @@ window.NFB = window.NFB || {};
   A.reportHTML = function (imp, r) {
     if (!r.ok) return `<div class="rpt"><h1>运营分析报告</h1><p class="rpt-empty">无可用数据：${core.esc(r.reason)}</p></div>`;
     const total = r.scores.total;
-    const pct = (v) => (v == null ? 0 : Math.max(3, v));
+    const pct = (v) => (v == null ? 0 : v);
     const h = [];
     h.push('<div class="rpt">');
     h.push(`<div class="rpt-hd">
@@ -537,11 +534,12 @@ window.NFB = window.NFB || {};
       });
     });
     h.push(`<h2>三、评分口径与数据说明</h2>`);
-    h.push(`<table class="rpt-table"><thead><tr><th>维度</th><th>权重</th><th>算法</th></tr></thead><tbody>
-      ${DIMS.map((d) => `<tr><td>${d.label}</td><td>${Math.round(d.weight * 100)}%</td><td>${core.esc(d.desc)}</td></tr>`).join("")}
+    h.push(`<table class="rpt-table"><thead><tr><th>维度</th><th>权重</th><th>本期观测</th><th>算法</th></tr></thead><tbody>
+      ${DIMS.map((d) => `<tr><td>${d.label}</td><td>${Math.round(d.weight * 100)}%</td><td>${core.esc(r.scores.observed[d.id])}</td><td>${core.esc(d.desc)}</td></tr>`).join("")}
     </tbody></table>`);
     h.push(`<div class="rpt-note">
-      <div>总分 = 各维度按权重加权平均；“需求增长”无上一账期时不参与计分并重新分配权重。</div>
+      <div>参考分为工具自定，并非游戏官方评分。四项账目数据齐全时按固定权重加权；当前可用 ${r.scores.covered} / ${DIMS.length} 项。阈值仅用于定位问题。</div>
+      <div>乘客可能跨账期完成行程或获得赔付；日账获赔比例仅作提示，不同需求设置下的分数不宜直接比较。</div>
       <div>分析范围：当前档案所选账期内的全部线路与站点（不受地图区域筛选影响）。</div>
       <div>数据口径：票款净额 = 票款 + 退票 + 补偿；运营成本 = 运行 + 维护 + 干预；运营利润 = 票款净额 − 运营成本；公司现金流含建设与购车等资本支出。</div>
       ${r.days ? `<div>站点账目在「${core.periodLabel(r.per)}」粒度下由日账自动汇总，覆盖 ${r.days.days} 天（${r.days.from} ~ ${r.days.to}）。</div>` : ""}

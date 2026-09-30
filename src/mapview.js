@@ -1,4 +1,4 @@
-/* NIMBY Finance · Leaflet map rendering (OSM/CARTO/Esri + Mapbox raster) */
+/* NIMBY Finance · Leaflet map rendering (CARTO/Esri + Mapbox raster) */
 "use strict";
 window.NFB = window.NFB || {};
 (function (NS) {
@@ -6,26 +6,28 @@ window.NFB = window.NFB || {};
   const core = NS.core;
   let map, lineLayer, stationLayer, labelLayer, baseLayer = null;
   let imp = null, opt = {};
-  let baseKey = "osm";
+  let baseKey = "voyage";
   let mbToken = "";
 
   const BASES = {
-    osm: { name: "OpenStreetMap 标准", url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", att: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', maxZoom: 19 },
     voyage: { name: "CARTO 暖色", url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", att: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>', maxZoom: 20, sub: "abcd" },
     dark: { name: "CARTO 深色", url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", att: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>', maxZoom: 20, sub: "abcd" },
     sat: { name: "Esri 卫星", url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", att: "Tiles &copy; Esri", maxZoom: 19 },
     plain: { name: "纯色底图(离线可用)", url: "", att: "", maxZoom: 18 },
   };
   const MB_STYLES = [
-    ["streets", "Mapbox 街道", "mapbox/streets-v11", "linear-gradient(135deg,#3b5cd9,#6f8bff)"],
-    ["light", "Mapbox 浅色", "mapbox/light-v10", "linear-gradient(135deg,#e8ecf2,#fbfcfe)"],
-    ["dark", "Mapbox 深色", "mapbox/dark-v10", "linear-gradient(135deg,#2a3242,#14181f)"],
-    ["satellite", "Mapbox 卫星", "mapbox/satellite-v9", "linear-gradient(135deg,#2e4a33,#9fb7a0)"],
+    ["streets", "Mapbox 街道", "mapbox/streets-v11"],
+    ["light", "Mapbox 浅色", "mapbox/light-v10"],
+    ["dark", "Mapbox 深色", "mapbox/dark-v10"],
+    ["satellite", "Mapbox 卫星", "mapbox/satellite-v9"],
   ];
   const MB_ATTR = '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 
   V.init = function (el, hooks) {
     V.hooks = hooks || {};
+    mbToken = (V.hooks.initialToken || "").trim();
+    const savedBase = V.hooks.initialBase;
+    baseKey = (BASES[savedBase] || (mbToken && MB_STYLES.some((st) => savedBase === "mb:" + st[0]))) ? savedBase : "voyage";
     map = L.map(el, {
       center: [35.0, 113.6], zoom: 5, worldCopyJump: true,
       minZoom: 2, maxZoom: 18, zoomControl: false, attributionControl: true,
@@ -48,6 +50,11 @@ window.NFB = window.NFB || {};
     return V;
   };
   V.map = () => map;
+  V.applyTheme = function () {
+    if (map && baseKey === "plain") {
+      map.getContainer().style.background = getComputedStyle(document.documentElement).getPropertyValue("--surface-soft").trim();
+    }
+  };
   V.setToken = function (token) {
     mbToken = (token || "").trim();
     if (mbToken && baseKey.indexOf("mb:") === 0) V.setBase(baseKey);
@@ -57,7 +64,7 @@ window.NFB = window.NFB || {};
 
   function drawControl(div) {
     div.innerHTML = "";
-    const cols = ["osm", "voyage", "dark", "sat", "plain"];
+    const cols = ["voyage", "dark", "sat", "plain"];
     const row = core.el("div", "row");
     cols.forEach((k) => row.appendChild(swBtn(k, BASES[k].name)));
     div.appendChild(row);
@@ -71,7 +78,15 @@ window.NFB = window.NFB || {};
       const btn = document.createElement("button");
       btn.className = "bs" + (activeKey(k) ? " on" : "");
       btn.title = title;
-      btn.innerHTML = `<span class="sw sw-${k === "mb:menu" ? "tok" : k}"></span>`;
+      btn.type = "button";
+      btn.setAttribute("aria-label", title);
+      if (k !== "mb:menu") btn.setAttribute("aria-pressed", String(activeKey(k)));
+      btn.innerHTML = k === "mb:menu" ? '<span class="sw sw-tok">M</span><span class="mb-trigger-label">Mapbox</span>' : `<span class="sw sw-${k}"></span>`;
+      if (k === "mb:menu") {
+        btn.classList.add("mb-trigger");
+        btn.setAttribute("aria-haspopup", "true");
+        btn.setAttribute("aria-expanded", "false");
+      }
       btn.onclick = () => {
         if (k === "mb:menu") return;
         V.setBase(k);
@@ -85,12 +100,16 @@ window.NFB = window.NFB || {};
   }
   function toggleMbMenu(wrap) {
     const old = wrap.querySelector(".mb-menu");
-    if (old) { old.remove(); return; }
+    const trigger = wrap.querySelector(".mb-trigger");
+    if (old) { old.remove(); trigger.setAttribute("aria-expanded", "false"); return; }
     const menu = core.el("div", "mb-menu");
+    menu.setAttribute("role", "group");
+    menu.setAttribute("aria-label", "Mapbox 底图");
+    trigger.setAttribute("aria-expanded", "true");
     // token status
     const tokItem = core.el("button", "", "");
     tokItem.innerHTML = `<span class="sw sw-tok">M</span><span class="lbl tok-set">${mbToken ? "✓ 已设置 Token · 更换" : "⚙ 设置 Mapbox Token…"}</span>`;
-    tokItem.onclick = () => { menu.remove(); if (V.hooks.onNeedToken) V.hooks.onNeedToken(); };
+    tokItem.onclick = () => { menu.remove(); trigger.setAttribute("aria-expanded", "false"); if (V.hooks.onNeedToken) V.hooks.onNeedToken(); };
     menu.appendChild(tokItem);
     menu.appendChild(core.el("div", "sep"));
     const disabled = !mbToken;
@@ -98,11 +117,12 @@ window.NFB = window.NFB || {};
       const it = core.el("button", "", "");
       it.style.cursor = disabled ? "not-allowed" : "pointer";
       it.title = disabled ? "请先设置 Mapbox Token" : "";
-      it.innerHTML = `<span class="sw" style="background:${name.indexOf("卫星") >= 0 ? "linear-gradient(135deg,#2e4a33,#9fb7a0)" : "linear-gradient(135deg,#dfe6f2,#ffffff);border-color:#b9c8ee"}"></span><span class="lbl">${name}</span>`;
+      it.innerHTML = `<span class="sw sw-mb-${key}"></span><span class="lbl">${name}</span>`;
       it.onclick = () => {
-        if (!mbToken) { menu.remove(); if (V.hooks.onNeedToken) V.hooks.onNeedToken(); return; }
+        if (!mbToken) { menu.remove(); trigger.setAttribute("aria-expanded", "false"); if (V.hooks.onNeedToken) V.hooks.onNeedToken(); return; }
         V.setBase("mb:" + key);
         menu.remove();
+        trigger.setAttribute("aria-expanded", "false");
       };
       menu.appendChild(it);
     });
@@ -118,7 +138,7 @@ window.NFB = window.NFB || {};
       if (baseLayer) map.removeLayer(baseLayer);
       baseLayer = null;
       const c = map.getContainer();
-      c.style.background = "#e8edf4";
+      c.style.background = getComputedStyle(document.documentElement).getPropertyValue("--surface-soft").trim();
       c.querySelectorAll("img.leaflet-tile").forEach((i) => i.remove());
       const attr = c.querySelector(".leaflet-control-attribution");
       if (attr) attr.textContent = "纯色底图(离线)";

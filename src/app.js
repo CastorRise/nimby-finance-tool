@@ -15,12 +15,8 @@ window.NFB = window.NFB || {};
   };
   const st = Object.assign({}, DEFAULTS);
   let imp = null; // active import (in-memory)
-  let busy = false;
   const activeCharts = [];
-  const impCache = new Map();
   let fitRequested = false;
-  let currentCSV = null;
-  let csvFileName = "表格";
 
   /* ---------------- boot ---------------- */
   A.init = async function () {
@@ -28,6 +24,7 @@ window.NFB = window.NFB || {};
     await store.init();
     Object.assign(st, DEFAULTS, store.ws().settings || {});
     bindStatic();
+    NS.theme.apply();
     await refreshImportListMeta();
     if (st.activeId && store.listImportsMeta().find((m) => m.id === st.activeId)) {
       await setActive(st.activeId, true);
@@ -58,6 +55,7 @@ window.NFB = window.NFB || {};
   function toast(msg, kind) {
     const root = document.getElementById("toast-root");
     const t = core.el("div", "toast" + (kind ? " " + kind : ""), core.esc(msg));
+    t.setAttribute("role", kind === "err" ? "alert" : "status");
     root.appendChild(t);
     setTimeout(() => t.remove(), kind === "err" ? 6000 : 3200);
   }
@@ -67,8 +65,19 @@ window.NFB = window.NFB || {};
   function bindStatic() {
     document.getElementById("btn-open-import").onclick = () => NS.exportcenter.openImportDialog();
     document.getElementById("btn-export-center").onclick = () => NS.exportcenter.open();
+    document.getElementById("btn-theme").onclick = () => NS.theme.cycle();
+    document.addEventListener("nfb-theme-change", () => {
+      NS.mapview.applyTheme();
+      if (!imp) return;
+      const view = document.getElementById("tabview");
+      const scrollTop = view.scrollTop;
+      renderActiveTab(true);
+      requestAnimationFrame(() => { view.scrollTop = scrollTop; });
+    });
     document.getElementById("btn-help").onclick = showHelp;
-    document.getElementById("btn-compare").onclick = () => switchTab("compare");
+    document.getElementById("panel-imports").addEventListener("toggle", (e) => {
+      if (e.target.open) window.getSelection()?.removeAllRanges();
+    });
     const selActive = document.getElementById("sel-active-import");
     selActive.onchange = async () => { if (selActive.value) await setActive(selActive.value, true); };
     // granularity
@@ -78,11 +87,13 @@ window.NFB = window.NFB || {};
         st.per = b.dataset.g;
         st.ts = null;
         refresh();
+        persistState();
       }
     });
     document.getElementById("sel-bucket").onchange = (e) => {
       st.ts = e.target.value || null;
       refresh();
+      persistState();
     };
     ["chk-lines", "chk-stations", "chk-labels"].forEach((id) => {
       document.getElementById(id).onchange = (e) => {
@@ -94,29 +105,58 @@ window.NFB = window.NFB || {};
       };
     });
     const ms = document.getElementById("sel-metric-station");
-    ms.onchange = () => { st.metricStation = ms.value; autoScheme(ms.value); persistState(); refresh(); };
+    ms.onchange = () => { st.metricStation = ms.value; autoScheme(ms.value); persistState(); renderMap(false); };
     const ml = document.getElementById("sel-metric-line");
-    ml.onchange = () => { st.metricLine = ml.value; autoScheme(ml.value); persistState(); refresh(); };
-    document.getElementById("sel-scheme").onchange = (e) => { st.scheme = e.target.value; st._schemeManual = true; persistState(); refresh(); };
-    document.getElementById("sel-scale").onchange = (e) => { st.scale = e.target.value; persistState(); refresh(); };
+    ml.onchange = () => { st.metricLine = ml.value; autoScheme(ml.value); persistState(); renderMap(false); };
+    document.getElementById("sel-scheme").onchange = (e) => { st.scheme = e.target.value; st._schemeManual = true; persistState(); renderMap(false); };
+    document.getElementById("sel-scale").onchange = (e) => { st.scale = e.target.value; persistState(); renderMap(false); };
     document.getElementById("btn-fit-world").onclick = () => { NS.mapview.fitNetwork(true); };
-    document.getElementById("btn-region-all").onclick = () => { st.regionOff = []; persistState(); refreshRegionUI(); refresh(); };
+    document.getElementById("btn-region-all").onclick = () => { st.regionOff = []; persistState(); refreshRegionUI(); renderMap(true); };
     document.getElementById("btn-region-fit").onclick = () => { fitVisible(); };
     // tabs
     document.getElementById("tabsbar").addEventListener("click", (e) => {
       const t = e.target.closest("button.tab");
       if (t) switchTab(t.dataset.tab);
     });
+    document.getElementById("tabsbar").addEventListener("keydown", (e) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+      const items = Array.from(document.querySelectorAll("#tabsbar button.tab"));
+      const index = items.indexOf(document.activeElement);
+      if (index < 0) return;
+      e.preventDefault();
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (index + (e.key === "ArrowRight" ? 1 : -1) + items.length) % items.length;
+      items[next].focus();
+      switchTab(items[next].dataset.tab);
+    });
     // rank tabs
     document.querySelector("#rankpanel").addEventListener("click", (e) => {
       const t = e.target.closest("button.rank-tab");
       if (t) {
-        document.querySelectorAll(".rank-tab").forEach((x) => x.classList.remove("active"));
+      document.querySelectorAll(".rank-tab").forEach((x) => {
+          x.classList.remove("active");
+          x.setAttribute("aria-selected", "false");
+          x.tabIndex = -1;
+        });
         t.classList.add("active");
+        t.setAttribute("aria-selected", "true");
+        t.tabIndex = 0;
+        document.getElementById("ranklist").setAttribute("aria-labelledby", t.id);
         renderRanklist(t.dataset.rank);
       }
     });
-    window.addEventListener("resize", () => { activeCharts.forEach((c) => c.resize && c.resize()); });
+    document.querySelector("#rankpanel .rank-tabs").addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const items = Array.from(document.querySelectorAll(".rank-tab"));
+      const index = items.indexOf(document.activeElement);
+      if (index < 0) return;
+      e.preventDefault();
+      const next = (index + (e.key === "ArrowRight" ? 1 : -1) + items.length) % items.length;
+      items[next].focus(); items[next].click();
+    });
+    window.addEventListener("resize", () => {
+      activeCharts.forEach((c) => c.resize && c.resize());
+      NS.mapview.map()?.invalidateSize();
+    });
   }
 
   /* ---------------- import list ---------------- */
@@ -127,35 +167,38 @@ window.NFB = window.NFB || {};
     const emptyEl = document.getElementById("import-list-empty");
     emptyEl.classList.toggle("hidden", metas.length > 0);
     document.getElementById("imp-count").textContent = metas.length ? metas.length + " 档" : "";
+    document.getElementById("import-quick").classList.toggle("hidden", metas.length === 0);
     const sel = document.getElementById("sel-active-import");
-    const cur = sel.value;
     sel.innerHTML = metas.map((m) => `<option value="${core.esc(m.id)}">${core.esc(m.label)}</option>`).join("");
-    if (cur && metas.find((m) => m.id === cur)) sel.value = cur;
+    if (st.activeId && metas.find((m) => m.id === st.activeId)) sel.value = st.activeId;
     metas.slice().reverse().forEach((m) => {
-      const li = core.el("li", "");
+      const li = core.el("li", m.id === st.activeId ? "active" : "");
       li.dataset.id = m.id;
-      li.innerHTML = `<div class="imp-name"><span>${core.esc(m.label)}</span>${m.id === st.activeId ? '<span class="imp-badge">当前</span>' : ""}</div>
+      li.innerHTML = `<button type="button" class="imp-switch" aria-label="切换到档案 ${core.esc(m.label)}" ${m.id === st.activeId ? 'aria-current="true"' : ""}><div class="imp-name"><span>${core.esc(m.label)}</span>${m.id === st.activeId ? '<span class="imp-badge">当前</span>' : ""}</div>
         <div class="imp-sub"><span>${core.esc(m.company || "")}${m.geoOk && m.finOk ? "" : m.geoOk ? " · 仅几何" : m.finOk ? " · 仅财务" : ""}</span>
-        <span>${m.exportClock ? core.shortEpoch(m.exportClock) : ""}</span></div>
+        <span>${m.exportClock ? core.shortEpoch(m.exportClock) : ""}</span></div></button>
         <div class="imp-actions">
           <button class="btn xs" data-act="rename">重命名</button>
           <button class="btn xs" data-act="export">导出</button>
           <button class="btn xs danger" data-act="del">删除</button>
         </div>`;
-      li.onclick = async (e) => {
-        if (e.target.closest("[data-act]")) return;
+      li.querySelector(".imp-switch").onclick = async () => {
         if (m.id !== st.activeId) await setActive(m.id, true);
       };
       li.querySelector('[data-act="rename"]').onclick = async () => {
         const v = prompt("档案名称:", m.label);
-        if (v && v.trim()) { await store.updateImportMeta(m.id, { label: v.trim() }); refreshImportListMeta(); }
+        if (v && v.trim()) {
+          const label = v.trim();
+          await store.updateImportMeta(m.id, { label });
+          if (imp && imp.id === m.id) imp.label = label;
+          refreshImportListMeta();
+        }
       };
       li.querySelector('[data-act="export"]').onclick = () => NS.exportcenter.exportSingleImport(m);
       li.querySelector('[data-act="del"]').onclick = async () => {
         const yes = await NS.exportcenter.confirm(`删除档案「${m.label}」？相关对比也会一并删除。`);
         if (!yes) return;
         await store.removeImport(m.id);
-        impCache.delete(m.id);
         A.reloadAll();
       };
       ul.appendChild(li);
@@ -169,39 +212,39 @@ window.NFB = window.NFB || {};
     if (!imp) { renderEmpty(true); return; }
     store.rehydrate(imp);
     engine.prepare(imp);
-    impCache.set(id, imp);
+    await refreshImportListMeta();
     persistState();
     fitRequested = fit;
     renderEmpty(false);
-    refresh(true);
+    refresh();
   }
 
   /* ---------------- empty state ---------------- */
   function renderEmpty(empty) {
-    document.getElementById("kpis").classList.toggle("hidden", empty);
-    document.getElementById("mapwrap").classList.toggle("hidden", empty);
+    document.getElementById("sidebar").classList.toggle("hidden", empty);
+    document.getElementById("overview-top").classList.toggle("hidden", empty);
     document.getElementById("tabsbar").classList.toggle("hidden", empty);
     document.getElementById("rankpanel").classList.toggle("hidden", empty);
     let hero = document.getElementById("empty-hero");
     if (empty) {
       if (!hero) {
-        hero = core.el("div", "", "");
+        hero = core.el("div", "empty-hero", "");
         hero.id = "empty-hero";
-        hero.style.cssText = "flex:1;display:flex;align-items:center;justify-content:center;background:#fff;border:1px solid #e3e8f0;border-radius:14px;margin:0 12px 12px";
         hero.innerHTML = `
-          <div style="text-align:center;padding:30px;max-width:520px">
-            <div style="font-size:34px;margin-bottom:10px">🚆</div>
-            <div style="font-size:17px;font-weight:650;margin-bottom:8px">欢迎使用 NIMBY · 财务地图分析台</div>
-            <div class="step-hint" style="line-height:2;margin-bottom:14px">
-              1. 在 NIMBY Rails 中把线路/车站导出为 <b>JSON(时刻表)</b> 与 <b>TSV(会计账目)</b><br>
-              2. 点击右上「＋ 导入游戏导出数据」，两个文件一起拖入<br>
-              3. 即可在世界地图上查看线路与站点热度、线路盈亏表格、走势与历史对比
-            </div>
-            <div style="display:flex;gap:10px;justify-content:center">
+          <div class="empty-content">
+            <div class="empty-mark"><img src="assets/rail-route.png" width="32" height="32" alt="" aria-hidden="true"></div>
+            <h2>开始分析你的财务地图</h2>
+            <p>导入 NIMBY Rails 的导出文件，查看线路、站点与经营趋势。</p>
+            <ol class="empty-steps">
+              <li><span>1</span>在游戏中导出时刻表 JSON 与会计账目 TSV</li>
+              <li><span>2</span>选择两个文件，也可以只导入其中一种</li>
+              <li><span>3</span>在地图、报表和历史对比中探索数据</li>
+            </ol>
+            <div class="empty-actions">
               <button class="btn primary" id="empty-import">＋ 立即导入数据</button>
               <button class="btn" id="empty-help">使用说明</button>
             </div>
-            <div style="margin-top:12px;font-size:11.4px;color:#93a0b4">数据只保存在本机浏览器中 · 可打包导出到其它设备继续分析</div>
+            <p class="empty-note">数据保存在本机浏览器，也可以打包导出到其他设备。</p>
           </div>`;
         document.getElementById("main").appendChild(hero);
         hero.querySelector("#empty-import").onclick = () => NS.exportcenter.openImportDialog();
@@ -215,13 +258,13 @@ window.NFB = window.NFB || {};
       // re-init map if cleared
       if (!NS.mapview.map() || !document.getElementById("map")._leaflet_id) {
         document.getElementById("map").innerHTML = "";
+        const mapSettings = store.ws().settings || {};
         NS.mapview.init(document.getElementById("map"), {
+          initialBase: mapSettings.baseMap,
+          initialToken: mapSettings.mapboxToken,
           onNeedToken: openMapboxTokenDialog,
           onBaseChange: (k) => store.setSettings({ baseMap: k }),
         });
-        NS.mapview.setToken((store.ws().settings || {}).mapboxToken || "");
-        const baseMap = (store.ws().settings || {}).baseMap;
-        if (baseMap && baseMap !== "osm") NS.mapview.setBase(baseMap);
       }
       // ensure correct sizing after being hidden
       setTimeout(() => { const m = NS.mapview.map(); if (m) m.invalidateSize(); }, 60);
@@ -235,26 +278,28 @@ window.NFB = window.NFB || {};
       获取方式：登录 <b>mapbox.com</b> → 账号 → <b>Tokens</b> → 新建默认公共令牌并复制。
       Token 只保存在<b>本机浏览器</b>，仅用于向 Mapbox 请求地图瓦片。</div>
       <label class="field-label" style="margin-top:4px">Mapbox Access Token
-        <input id="mb-token-input" type="password" autocomplete="off" spellcheck="false" style="border:1px solid #d4dbe7;border-radius:9px;padding:9px 11px;font-family:var(--mono);font-size:12px"
+        <input id="mb-token-input" type="password" autocomplete="off" spellcheck="false" style="font-family:var(--mono)"
           placeholder="pk.eyJ1Ijoi…">
       </label>
-      <div id="mb-token-hint" class="rt" style="margin-top:6px"></div>`;
+      <div id="mb-token-hint" class="rt" role="status" style="margin-top:6px"></div>`;
     const inp = body.querySelector("#mb-token-input");
     inp.value = (store.ws().settings || {}).mapboxToken || "";
     const hint = body.querySelector("#mb-token-hint");
     const btnSave = core.el("button", "btn primary", "保存并使用 Mapbox");
-    const btnClear = core.el("button", "btn ghost", "清除 Token(回到普通底图)");
+    const btnClear = core.el("button", "btn ghost", "清除 Token(回到 CARTO 暖色)");
     const m = NS.exportcenter.showModal({
       title: "Mapbox 底图设置", body, narrow: true,
       footer: [btnClear, btnSave],
     });
     inp.addEventListener("input", () => {
       const v = inp.value.trim();
+      inp.setAttribute("aria-invalid", String(!!v && !v.startsWith("pk.")));
       hint.textContent = v && !v.startsWith("pk.") ? "注意：公开令牌通常以 pk. 开头" : "";
     });
     btnSave.onclick = async () => {
       const v = inp.value.trim();
-      if (!v) { hint.textContent = "请粘贴令牌"; return; }
+      if (!v) { inp.setAttribute("aria-invalid", "true"); hint.textContent = "请粘贴令牌"; inp.focus(); return; }
+      if (!v.startsWith("pk.")) { inp.setAttribute("aria-invalid", "true"); hint.textContent = "请输入以 pk. 开头的公开访问令牌"; inp.focus(); return; }
       await store.setSettings({ mapboxToken: v });
       NS.mapview.setToken(v);
       NS.mapview.setBase("mb:streets");
@@ -264,26 +309,24 @@ window.NFB = window.NFB || {};
     btnClear.onclick = async () => {
       await store.setSettings({ mapboxToken: "" });
       NS.mapview.setToken("");
-      NS.mapview.setBase("osm");
+      NS.mapview.setBase("voyage");
       m.close();
-      toast("已清除 Token，底图回到 OpenStreetMap", "ok");
+      toast("已清除 Token，底图回到 CARTO 暖色", "ok");
     };
   }
   A.openMapboxTokenDialog = openMapboxTokenDialog;
 
   /* ---------------- refresh pipeline ---------------- */
-  function refresh(first) {
+  function refresh() {
     if (!imp) return;
     refreshControlsUI();
     refreshAnalysis();
-    renderMap(true);
+    renderMap(false);
   }
 
   /* refresh control widgets based on active import availability */
   function refreshControlsUI() {
-    const metas = store.listImportsMeta();
-    refreshImportListMeta();
-    document.getElementById("tb-center").classList.toggle("hidden", !metas.length);    // granularity buttons
+    // granularity buttons
     const seg = document.getElementById("seg-granularity");
     seg.innerHTML = "";
     core.PERIODS.forEach((p) => {
@@ -296,9 +339,9 @@ window.NFB = window.NFB || {};
     });
     // bucket select
     const sel = document.getElementById("sel-bucket");
-    const list = engine.buckets(imp, st.per, "li");
-    const use = list.length ? list : engine.buckets(imp, st.per, "st");
-    const used = list.length ? list : (engine.buckets(imp, st.per, "st").length ? engine.buckets(imp, st.per, "st") : engine.buckets(imp, st.per, "co"));
+    const lineBuckets = engine.buckets(imp, st.per, "li");
+    const stationBuckets = engine.buckets(imp, st.per, "st");
+    const used = lineBuckets.length ? lineBuckets : stationBuckets.length ? stationBuckets : engine.buckets(imp, st.per, "co");
     if (!st.ts || !used.includes(st.ts)) st.ts = used.length ? used[used.length - 1] : null;
     sel.innerHTML = used.length
       ? used.map((t) => `<option value="${core.esc(t)}">${core.fmtBucket(st.per, t)}</option>`).join("")
@@ -317,6 +360,11 @@ window.NFB = window.NFB || {};
     };
     fillMetric("sel-metric-station", "st", "metricStation");
     fillMetric("sel-metric-line", "li", "metricLine");
+    document.getElementById("sel-scheme").value = st.scheme;
+    document.getElementById("sel-scale").value = st.scale;
+    document.getElementById("chk-lines").checked = st.showLines;
+    document.getElementById("chk-stations").checked = st.showStations;
+    document.getElementById("chk-labels").checked = st.showLabels;
     refreshRegionUI();
   }
   function refreshRegionUI() {
@@ -327,7 +375,9 @@ window.NFB = window.NFB || {};
     const regionCountEl = document.getElementById("region-count");
     regionCountEl.textContent = imp.regions.length + " 区";
     imp.regions.forEach((rg) => {
-      const chip = core.el("span", "chip" + (off.has(rg.name) ? " off" : " on"), "");
+      const chip = core.el("button", "chip" + (off.has(rg.name) ? " off" : " on"), "");
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(!off.has(rg.name)));
       chip.innerHTML = `${core.esc(rg.name)}<span class="n">${rg.n}</span>`;
       chip.onclick = () => {
         if (off.has(rg.name)) off.delete(rg.name); else off.add(rg.name);
@@ -367,7 +417,6 @@ window.NFB = window.NFB || {};
     const el = document.getElementById("kpis");
     const rev = kpiVal("co", "revenue"), cost = kpiVal("co", "opex"), profit = kpiVal("co", "opProfit");
     const board = kpiVal("co", "paxBoard");
-    const scope = st.ts ? `账期 ${core.fmtBucket(st.per, st.ts)}` : "无账期";
     // previous daily bucket delta for profit/rev
     let dProfit = null;
     if (st.per === "daily" && st.ts) {
@@ -388,7 +437,7 @@ window.NFB = window.NFB || {};
       ["登乘客流", board, "pax", null, ""],
     ];
     el.innerHTML = cards.map(([l, v, unit, d, cls]) => `
-      <div class="kpi"><div class="k-l"><span>${l}</span><span class="rt">${scope}</span></div>
+      <div class="kpi"><div class="k-l"><span>${l}</span></div>
         <div class="k-v ${unit === "money" ? "money " : ""}${cls || ""}">${fmtMetric(v, unit)}</div>
         <div class="k-s">${d != null ? deltaHtml(d, v - d) : unit === "money" ? "金额·游戏货币" : "单位:人次"}</div></div>`).join("");
   }
@@ -438,7 +487,7 @@ window.NFB = window.NFB || {};
     }
     if (st.ts && kpiVal("co", "opProfit") == null) tips.push("当前账期没有公司级行(可能该日无运营或仅部分线路)，部分卡片为—。");
     const ab = store.ws().settings || {};
-    tips.push(`导入的数据已<b>自动保存在本机浏览器</b>(刷新/重开不丢)${ab.autoBackup === false ? "；自动文件备份当前为关(可在导出中心打开)" : "；且每次导入会自动在“下载”生成备份文件(可在导出中心关闭)"}。`);
+    tips.push(`导入的数据已<b>自动保存在本机浏览器</b>(刷新/重开不丢)${ab.autoBackup === false ? "；自动文件备份当前为关(可在「导出与备份」打开)" : "；且每次导入会自动在“下载”生成备份文件(可在「导出与备份」关闭)"}。`);
     el.innerHTML = tips.map((t) => `<div>· ${t}</div>`).join("");
   }
 
@@ -451,8 +500,9 @@ window.NFB = window.NFB || {};
     const items = [];
     if (kind === "busy") {
       const stMap = aggOf("st");
+      const stationDescriptions = engine.describeStations(imp);
       for (const [id, a] of stMap) {
-        const sd = NS.engine.describeStations(imp).get(id);
+        const sd = stationDescriptions.get(id);
         const v = engine.metricOn("paxBoard", a);
         items.push({ key: id, name: (sd && sd.name) || ("站#" + id), sub: "登乘 " + core.fmtNum(v), v, kind: "st" });
       }
@@ -467,12 +517,18 @@ window.NFB = window.NFB || {};
     }
     items.slice(0, 8).forEach((it, i) => {
       const row = core.el("div", "rank-item");
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-label", `定位 ${it.name}`);
       const cls = core.moneyClass(it.v ?? 0);
       row.innerHTML = `<div class="rank-r1"><span class="rank-no">${i + 1}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${core.esc(it.name)}</span><span class="rank-val ${cls}">${it.v == null ? "—" : core.fmtMoney(it.v)}</span></div>
         <div class="rank-r2"><span></span><span>${core.esc(it.sub || "")}</span></div>`;
       row.onclick = () => {
         if (it.kind === "st") focusStation(it.key);
         else focusLine(String(it.key));
+      };
+      row.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); }
       };
       el.appendChild(row);
     });
@@ -520,10 +576,17 @@ window.NFB = window.NFB || {};
       const v = mStation ? engine.metricOn(mStation.id, a) : null;
       out.stationVals.set(id, v);
     }
-    const lineArr = Array.from(out.lineVals.values()).filter((v) => v != null && isFinite(v));
-    const stArr = Array.from(out.stationVals.values()).filter((v) => v != null && isFinite(v));
-    out.lineDomain = lineArr.length ? [Math.min(...lineArr), Math.max(...lineArr)] : null;
-    out.stationDomain = stArr.length ? [Math.min(...stArr), Math.max(...stArr)] : null;
+    const domainOf = (values) => {
+      let min = Infinity, max = -Infinity;
+      for (const v of values) {
+        if (v == null || !isFinite(v)) continue;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      return min === Infinity ? null : [min, max];
+    };
+    out.lineDomain = domainOf(out.lineVals.values());
+    out.stationDomain = domainOf(out.stationVals.values());
     out.ok = !!(out.lineDomain || out.stationDomain);
     return out;
   }
@@ -614,9 +677,9 @@ window.NFB = window.NFB || {};
     if (heat.lineDomain && st.showLines) {
       html += `<div class="legend-title" style="margin-top:7px">线路热度(线宽=幅度) · ${core.esc(lineLabel)} ${unitOf("metricLine")}</div>
         <div class="legend-labels" style="margin-top:3px"><span>${fmtLegend(st.metricLine, heat.lineDomain[0])}</span><span>${fmtLegend(st.metricLine, heat.lineDomain[1])}</span></div>
-        <div class="heat-row" style="margin-top:4px"><span>低</span><span style="flex:1;height:6px;background:linear-gradient(90deg,#c9d2e0,#3a465c);border-radius:4px"></span><span>高</span></div>`;
+        <div class="heat-row" style="margin-top:4px"><span>低</span><span style="flex:1;height:6px;background:linear-gradient(90deg,var(--line2),var(--ink));border-radius:4px"></span><span>高</span></div>`;
     }
-    if (!html) html = '<div class="legend-title" style="color:#93a0b4">当前账期无热度数据<br>(选有账目的粒度/账期)</div>';
+    if (!html) html = '<div class="legend-title" style="color:var(--faint)">当前账期无热度数据<br>(选有账目的粒度/账期)</div>';
     box.innerHTML = html;
   }
   function fmtLegend(metricId, v) {
@@ -636,7 +699,7 @@ window.NFB = window.NFB || {};
       ["登乘客流", core.fmtNum(engine.metricOn("paxBoard", m))],
       ["到达目的地", core.fmtNum(engine.metricOn("dest", m))],
       ["换乘人次", core.fmtNum(engine.metricOn("transfer", m))],
-      ["新出行需求", core.fmtNum(engine.metricOn("paxSpawn", m))],
+      ["开始行程", core.fmtNum(engine.metricOn("paxSpawn", m))],
       ["等待超时", core.fmtNum(engine.metricOn("wait", m))],
       ["票款收入", core.fmtMoney(engine.metricOn("fares", m))],
       ["平均票价", core.fmtMoney(engine.metricOn("fareAvg", m))],
@@ -671,7 +734,7 @@ window.NFB = window.NFB || {};
     const heatLine = lv == null ? "" : `<br>线路热度(${(engine.METRIC_BY_ID[st.metricLine] || {}).label || ""}) = <b>${fmtLegend(st.metricLine, lv)}</b>`;
     return `<span class="name-cell"><span class="dot" style="background:${core.hexCss(col)}"></span><b>${core.esc(name)}</b></span>
       <span class="tag-line">${core.esc(d.code || "")} · ${core.esc(d.region || "")}${d.lenKm ? " · " + d.lenKm.toFixed(1) + " km" : ""}${d.stopsN ? " · " + d.stopsN + " 站" : ""}</span>
-      ${(function () { const pm = engine.variantParentOf(imp, name); return pm ? `<br><span class="tag-line" style="color:#8a63d2">🚄 特快/附属线：走向沿主线「${core.esc(pm)}」对齐(虚线)</span>` : ""; })()}<br>
+      ${(function () { const pm = engine.variantParentOf(imp, name); return pm ? `<br><span class="tag-line" style="color:var(--accent-ink)">特快/附属线：走向沿主线「${core.esc(pm)}」对齐(虚线)</span>` : ""; })()}<br>
       <span class="rt">账期 ${core.fmtBucket(st.per, st.ts)}</span>${heatLine}<br>
       ${metrics.map(([k, v, u]) => `${k}: <b>${f(v, u)}</b>`).join("<br>")}
       ${m ? "" : "<br><span class='rt'>该账期无此线路账目(可能未开行)</span>"}
@@ -733,12 +796,12 @@ window.NFB = window.NFB || {};
     /* header */
     const head = core.el("div", "panel adv-head", "");
     head.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="adv-head-inner">
         <div>
           <div class="adv-h1">运营诊断 · 自动分析</div>
           <div class="adv-h2">基于左侧所选账期：<b>${core.esc(r.scopeLabel)}</b>（${core.periodLabel(st.per)}粒度）${r.days ? ` · 站点数据由日账汇总 ${r.days.days} 天` : ""}${r.prevTs ? ` · 环比 ${core.esc(core.fmtBucket(st.per, r.prevTs))}` : ""}</div>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div class="adv-head-actions">
           <button class="btn sm" id="adv-reload">↻ 重新分析</button>
           <button class="btn sm primary" id="adv-view">👁 查看完整报告</button>
           <button class="btn sm" id="adv-copy">⧉ 复制 Markdown</button>
@@ -752,27 +815,28 @@ window.NFB = window.NFB || {};
     const scoreCard = core.el("div", "chart-card", "");
     const total = r.scores.total;
     scoreCard.innerHTML = `
-      <div class="cc-head">综合运营评分<span class="sub">0-100 · 越高越健康</span></div>
+      <div class="cc-head">运营参考评分<span class="sub">自定义 0–100 · 四项齐全才计分</span></div>
       <div class="adv-score">
         <div class="adv-score-num ${scoreCls(total)}">${total == null ? "—" : total.toFixed(0)}</div>
         <div class="adv-score-side">
           <span class="adv-grade ${r.grade.cls}">${core.esc(r.grade.label)}</span>
-          <div class="adv-score-note">${r.lineStats.losing} / ${r.lineStats.total} 条线路运营亏损</div>
+          <div class="adv-score-note">已计入 ${r.scores.covered} / ${ad.DIMS.length} 项 · ${r.lineStats.losing} / ${r.lineStats.total} 条线路运营亏损</div>
         </div>
       </div>
       <div class="adv-bars">
         ${ad.DIMS.map((d) => {
           const v = r.scores.parts[d.id];
-          return `<div class="adv-bar-row">
+          return `<div class="adv-bar-row" title="${core.esc(r.scores.observed[d.id])}">
             <span class="adv-bar-l">${d.label}</span>
-            <span class="adv-bar-track"><i class="${scoreCls(v)}" style="width:${v == null ? 0 : Math.max(3, v)}%"></i></span>
+            <span class="adv-bar-track"><i class="${scoreCls(v)}" style="width:${v == null ? 0 : v}%"></i></span>
             <span class="adv-bar-v">${v == null ? "—" : v.toFixed(0)}</span>
           </div>`;
         }).join("")}
-      </div>`;
+      </div>
+      <div class="adv-score-facts">${ad.DIMS.map((d) => `<span>${core.esc(r.scores.observed[d.id])}</span>`).join("")}</div>`;
     row.appendChild(scoreCard);
     const radarCard = core.el("div", "chart-card", "");
-    radarCard.innerHTML = `<div class="cc-head">能力雷达<span class="sub">无上期数据时“需求增长”计 0 且不参与总分</span></div><div id="adv-radar" class="chart sm"></div>`;
+    radarCard.innerHTML = `<div class="cc-head">能力雷达<span class="sub">只展示有数据的维度</span></div><div id="adv-radar" class="chart sm"></div>`;
     row.appendChild(radarCard);
     view.appendChild(row);
 
@@ -830,7 +894,8 @@ window.NFB = window.NFB || {};
         <summary>评分口径与数据说明</summary>
         <div class="adv-method">
           ${ad.DIMS.map((d) => `<div><b>${d.label}</b>（权重 ${Math.round(d.weight * 100)}%）：${d.desc}</div>`).join("")}
-          <div>总分 = 各维度按权重加权平均；“需求增长”无上一账期时不参与计分并重新分配权重。</div>
+          <div>参考分为工具自定，并非游戏官方评分。四项数据齐全时按固定权重加权；缺项显示“—”，不把缺失当作 0 或 100 分。阈值是诊断参考线，不代表游戏规则。</div>
+          <div>乘客可能跨账期完成行程或获得赔付，日账的获赔比例仅作提示；不同需求设置下的分数不宜直接比较。</div>
           <div>分析范围：当前档案所选账期内的<b>全部线路与站点</b>（不受地图区域筛选影响）。</div>
           <div>数据口径：票款净额 = 票款 + 退票 + 补偿；运营成本 = 运行 + 维护 + 干预；运营利润 = 票款净额 − 运营成本；公司现金流含建设与购车等资本支出。</div>
           ${r.days ? `<div>站点账目在“${core.periodLabel(st.per)}”粒度下由日账自动汇总，覆盖 ${r.days.days} 天（${r.days.from} ~ ${r.days.to}）。</div>` : ""}
@@ -840,10 +905,17 @@ window.NFB = window.NFB || {};
     view.appendChild(foot);
 
     /* charts & buttons */
-    charts.radar(mkChart("adv-radar"),
-      ad.DIMS.map((d) => ({ name: d.label, max: 100 })),
-      ad.DIMS.map((d) => { const v = r.scores.parts[d.id]; return v == null ? 0 : Math.round(v); }),
-      { name: "运营评分" });
+    const radarDims = ad.DIMS.filter((d) => r.scores.parts[d.id] != null);
+    if (radarDims.length >= 3) {
+      charts.radar(mkChart("adv-radar"),
+        radarDims.map((d) => ({ name: d.label, max: 100 })),
+        radarDims.map((d) => Math.round(r.scores.parts[d.id])),
+        { name: "运营参考分" });
+    } else {
+      const radar = document.getElementById("adv-radar");
+      radar.classList.add("adv-radar-empty");
+      radar.textContent = "至少需要三项数据才能绘制雷达图";
+    }
     document.getElementById("adv-reload").onclick = () => renderActiveTab();
     document.getElementById("adv-export").onclick = () => {
       const label = core.fmtBucket(st.per, st.ts).replace(/[\/:*?"<>|\s]+/g, "_");
@@ -919,33 +991,47 @@ window.NFB = window.NFB || {};
   const tabs = ["overview", "advisor", "lines", "stations", "trend", "compare"];
   function switchTab(tab) {
     if (!tabs.includes(tab)) tab = "overview";
-    st.tab = tab;
-    persistState();
-    document.querySelectorAll("#tabsbar .tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === tab));
-    if (tab === "compare") {
-      const need2 = store.listImportsMeta().length >= 2;
-      if (!need2) {
-        toast("对比至少需要两个档案：请先导入第二个财务快照(同一公司不同日期的导出)", "err");
-        return;
-      }
-    }
-    renderActiveTab();
-  }
-  function renderActiveTab() {
-    killCharts();
-    const view = document.getElementById("tabview");
-    view.innerHTML = "";
-    currentCSV = null;
-    if (!imp) return;
-    const t = st.tab;
-    const hint = document.getElementById("view-hint");
-    if (t === "compare") {
-      hint.textContent = "对比使用各档案各自“最新账期”";
-      view.classList.add("tabpage", "scroll");
-      NS.compare.open(view, { auto: true });
+    if (tab === "compare" && store.listImportsMeta().length < 2) {
+      toast("对比至少需要两个档案：请先导入第二个财务快照(同一公司不同日期的导出)", "err");
       return;
     }
-    hint.textContent = "";
+    st.tab = tab;
+    persistState();
+    renderActiveTab();
+  }
+  function renderActiveTab(preserveCompare = false) {
+    killCharts();
+    NS.compare.dispose();
+    const view = document.getElementById("tabview");
+    view.innerHTML = "";
+    view.className = "";
+    view.scrollTop = 0;
+    if (!imp) return;
+    if (st.tab === "compare" && store.listImportsMeta().length < 2) {
+      st.tab = "overview";
+      persistState();
+    }
+    document.querySelectorAll("#tabsbar .tab").forEach((x) => {
+      const active = x.dataset.tab === st.tab;
+      x.classList.toggle("active", active);
+      x.setAttribute("aria-selected", String(active));
+      x.tabIndex = active ? 0 : -1;
+    });
+    view.setAttribute("aria-labelledby", "tab-" + st.tab);
+    const t = st.tab;
+    const main = document.getElementById("main");
+    if (main.dataset.tab !== t) {
+      main.dataset.tab = t;
+      requestAnimationFrame(() => NS.mapview.map()?.invalidateSize());
+    }
+    const hint = document.getElementById("view-hint");
+    if (t === "compare") {
+      hint.textContent = "各档案最新账期 · 向下滚动查看更多";
+      view.classList.add("tabpage", "scroll");
+      NS.compare.open(view, { auto: !preserveCompare });
+      return;
+    }
+    hint.textContent = t === "lines" || t === "stations" ? "表格内可滚动" : "向下滚动查看更多";
     if (t === "overview") renderOverview(view);
     else if (t === "advisor") renderAdvisor(view);
     else if (t === "lines") renderLines(view);
@@ -991,14 +1077,14 @@ window.NFB = window.NFB || {};
     if (xLbl.length) {
       const cA = mkChart("ov-trend-money");
       charts.lineTrend(cA, xLbl, [
-        { name: "营业收入", data: pick((a) => a.revenue), color: "#3457d5" },
-        { name: "运营成本", data: pick((a) => a.opex), color: "#e0a321" },
-        { name: "运营利润", data: pick((a) => a.opProfit), color: "#1d9a63" },
+        { name: "营业收入", data: pick((a) => a.revenue), color: charts.color("--accent") },
+        { name: "运营成本", data: pick((a) => a.opex), color: charts.color("--amber") },
+        { name: "运营利润", data: pick((a) => a.opProfit), color: charts.color("--green") },
       ], { unit: "money", legend: true });
       const cB = mkChart("ov-trend-pax");
       charts.lineTrend(cB, xLbl, [
-        { name: "登乘客流", data: pick((a) => a.paxBoard), color: "#3457d5" },
-        { name: "发车趟次", data: pick((a) => a.departures), color: "#8a63d2" },
+        { name: "登乘客流", data: pick((a) => a.paxBoard), color: charts.color("--accent") },
+        { name: "发车趟次", data: pick((a) => a.departures), color: charts.color("--orange") },
       ], { unit: "pax", legend: true });
     } else {
       view.appendChild(core.el("div", "note-box", "当前粒度没有账期数据 → 请切换「日/周/月…累计」等有账目的粒度，或先导入会计 TSV。"));
@@ -1241,7 +1327,7 @@ window.NFB = window.NFB || {};
       { k: "board", label: "登乘", num: true, fmt: (v) => (v == null ? "—" : core.fmtNum(v)) },
       { k: "dest", label: "到达", num: true, fmt: (v) => (v == null ? "—" : core.fmtNum(v)) },
       { k: "transfer", label: "换乘", num: true, fmt: (v) => (v == null ? "—" : core.fmtNum(v)) },
-      { k: "spawn", label: "新需求", num: true, fmt: (v) => (v == null ? "—" : core.fmtNum(v)) },
+      { k: "spawn", label: "开始行程", num: true, fmt: (v) => (v == null ? "—" : core.fmtNum(v)) },
       { k: "wait", label: "等待超时", num: true, fmt: (v) => (v == null ? "—" : core.fmtNum(v)) },
       { k: "fares", label: "票款", num: true, fmt: (v) => (v == null ? "—" : core.fmtMoney(v)) },
       { k: "fareAvg", label: "人均票价", num: true, fmt: (v) => (v == null ? "—" : core.fmtMoney(v)) },
@@ -1291,11 +1377,14 @@ window.NFB = window.NFB || {};
     const trMetrics = ["opProfit", "revenue", "opex", "cash", "paxBoard", "departures"];
     const selChips = new Set(["opProfit", "revenue", "opex"]);
     trMetrics.forEach((id) => {
-      const chip = core.el("span", "chip" + (selChips.has(id) ? " on" : ""));
+      const chip = core.el("button", "chip" + (selChips.has(id) ? " on" : ""));
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(selChips.has(id)));
       chip.textContent = (engine.METRIC_BY_ID[id] || {}).label;
       chip.onclick = () => {
         if (selChips.has(id)) { selChips.delete(id); chip.classList.remove("on"); }
         else { selChips.add(id); chip.classList.add("on"); }
+        chip.setAttribute("aria-pressed", String(selChips.has(id)));
         drawCompany();
       };
       chipRow.appendChild(chip);
@@ -1345,16 +1434,16 @@ window.NFB = window.NFB || {};
       <h4 style="margin:2px 0 8px">📖 使用说明</h4>
       <b>1 · 导入</b><br>
       在 NIMBY Rails 游戏里依次导出两个文件：<b>会计账目 (Accounting · .tsv)</b> 与 <b>时刻表/线路 (Timetable · .json)</b>，
-      点顶部「＋ 导入游戏导出数据」把它们一起拖入。只导入其中一个也可以（只有几何或只有财务）。
+      点顶部「＋ 导入数据」把它们一起拖入。只导入其中一个也可以（只有几何或只有财务）。
       <br><br><b>2 · 查看</b><br>
       地图：站点圆点颜色=站点热度(左栏可选指标/配色/缩放)，线路粗细=线路热度、颜色=盈亏或路线色；
-      支持区域筛选、缩放标签。底图：右上角按钮可切 OSM/CARTO/Esri；点 <b>M(Mapbox)</b> 选
+      支持区域筛选、缩放标签。底图：右上角按钮可切 CARTO/Esri；点 <b>M(Mapbox)</b> 选
       Mapbox 街道/浅色/深色/卫星——首次使用请在弹窗粘贴一次 Mapbox Access Token(仅存本机，不上传)。
       下方面板：运营总览 / 线路财务 / 站点客流 / 走势趋势，均随左侧“周期粒度+账期”变化。
       <br><br><b>3 · 对比历史</b><br>
       再次导入一次较新(或扩建前)的导出 → 顶部「⇄ 对比分析」，选择两个档案与主指标，可看线路/站点逐条变化并保存对比。
       <br><br><b>4 · 保存与导出</b><br>
-      数据自动保存在本机浏览器。右上「导出中心」可：逐个导出档案 / 打包为单文件 / 整库备份；
+      数据自动保存在本机浏览器。右上「导出与备份」可：逐个导出档案 / 打包为单文件 / 整库备份；
       得到 <b>.nb.json</b> 文件后可拷贝到其它电脑，导入即可继续(跨设备使用)。表格可随时“导出CSV”。
       <br><br><b>5 · 口径说明</b><br>
       票款净额=票款+退票+补偿；运营成本=运行+维护+干预(支出为负)；运营利润=票款净额−运营成本。
@@ -1387,6 +1476,6 @@ window.NFB = window.NFB || {};
   A.init().catch((e) => {
     console.error("应用启动失败", e);
     const box = document.getElementById("kpis");
-    if (box) box.innerHTML = `<div class="panel" style="grid-column:1/-1;color:#b91c1c">启动失败: ${core.esc(e.message || e)}</div>`;
+    if (box) box.innerHTML = `<div class="panel" style="grid-column:1/-1;color:var(--red)">启动失败: ${core.esc(e.message || e)}</div>`;
   });
 })(window.NFB);

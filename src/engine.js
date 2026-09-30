@@ -23,7 +23,7 @@ window.NFB = window.NFB || {};
     M("credit", "融资进账", "money", ["co"], (a) => a.credit ?? null),
     M("interest", "融资利息", "money", ["co"], (a) => neg(a.interest)),
     M("paxBoard", "登乘客流", "pax", ENT_ALL, (a) => a.paxBoard ?? null),
-    M("paxSpawn", "出行需求", "pax", ENT_ALL, (a) => a.paxSpawn ?? null),
+    M("paxSpawn", "开始行程人次", "pax", ENT_ALL, (a) => a.paxSpawn ?? null),
     M("paxNew", "新增乘客", "pax", ENT_ALL, (a) => a.paxNew ?? null),
     M("dest", "到达目的地", "pax", ENT_ALL, (a) => a.dest ?? null),
     M("transfer", "换乘人次", "pax", ENT_ALL, (a) => a.transfer ?? null),
@@ -33,6 +33,7 @@ window.NFB = window.NFB || {};
     M("tooFull", "满员无法上车", "pax", ENT_ALL, (a) => a.tooFull ?? null),
     M("refuse", "拒付票款", "pax", ENT_ALL, (a) => a.refuse ?? null),
     M("refunded", "退票人次", "pax", ENT_ALL, (a) => a.refunded ?? null),
+    M("paxCompensated", "获赔乘客", "pax", ENT_ALL, (a) => a.compPax ?? null),
     M("departures", "发车趟次", "num", ENT_ALL, (a) => a.departures ?? null),
     M("arrivedFull", "满员到站趟次", "num", ENT_ALL, (a) => a.arrivedFull ?? null),
     M("departedFull", "满员发车趟次", "num", ENT_ALL, (a) => a.departedFull ?? null),
@@ -135,6 +136,8 @@ window.NFB = window.NFB || {};
         for (const r of imp[KINDS[k]]) push(k, r.per, r.ts, r);
       }
       imp._aggCache = new Map();
+      imp._lineDescriptions = null;
+      imp._stationDescriptions = null;
       E.assignRegions(imp);
       // station id -> lines & index
       const stLines = new Map();
@@ -434,6 +437,7 @@ window.NFB = window.NFB || {};
   /* line rows for tables (union: geometry lines + accounting names) */
   E.describeLines = function (imp) {
     E.prepare(imp);
+    if (imp._lineDescriptions) return imp._lineDescriptions;
     const out = new Map();
     imp.lines.forEach((ln, i) => {
       const g = E.lineGeometry(imp, ln);
@@ -453,12 +457,14 @@ window.NFB = window.NFB || {};
         out.set(r.name, { kind: "line", name: r.name, code: r.code || "", color: [120, 130, 150], lineIdx: -1, lenKm: null, stopsN: null, region: "其他区域", accName: r.name, noGeo: true });
       }
     }
+    imp._lineDescriptions = out;
     return out;
   };
 
   /* station descriptions (union geometry + accounting) */
   E.describeStations = function (imp) {
     E.prepare(imp);
+    if (imp._stationDescriptions) return imp._stationDescriptions;
     const out = new Map();
     imp.stations.forEach((s, i) => {
       out.set(s.id, {
@@ -480,6 +486,7 @@ window.NFB = window.NFB || {};
         });
       }
     }
+    imp._stationDescriptions = out;
     return out;
   };
 

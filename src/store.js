@@ -104,6 +104,7 @@ window.NFB = window.NFB || {};
     imp.stById = new Map(imp.stations.map((s) => [s.id, s]));
     imp._prepared = false;
     imp._idx = null; imp._aggCache = null;
+    imp._lineDescriptions = null; imp._stationDescriptions = null;
     imp.buckets = imp.buckets || {};
     imp.stFb = imp.stFb || {};
     imp.accLi = imp.accLi || []; imp.accSt = imp.accSt || []; imp.accCo = imp.accCo || [];
@@ -147,7 +148,15 @@ window.NFB = window.NFB || {};
   };
   S.updateImportMeta = async function (id, patch) {
     const meta = WS.imports.find((x) => x.id === id);
-    if (meta) Object.assign(meta, patch);
+    if (!meta) return;
+    if (patch.label !== undefined) {
+      const saved = await S.getImport(id);
+      if (saved) {
+        saved.label = patch.label;
+        await persistImport(saved);
+      }
+    }
+    Object.assign(meta, patch);
     await persistWs();
   };
   S.addComparison = async function (cmp) {
